@@ -1,5 +1,6 @@
 const express = require('express');
 const GoogleStrategy = require('passport-google-oauth2').Strategy;
+const FacebookStrategy = require('passport-facebook').Strategy;
 const passport = require('passport');
 const dotenv = require('dotenv');
 const session = require('express-session');
@@ -41,8 +42,19 @@ passport.use(
         (request, accessToken, refreshToken, profile, done) => {
             // console.log(profile);
             if (profile.id) {
-                User.findOne({ googleId: profile.id }).then((existingUser) => {
+                User.findOne({ email: profile.emails[0].value }).then(async (existingUser) => {
                     if (existingUser) {
+                        await User.updateOne(
+                            {
+                                email: profile.emails[0].value,
+                            },
+                            {
+                                googleId: profile.id,
+                            },
+                            {
+                                new: true,
+                            },
+                        );
                         return done(null, existingUser);
                     } else {
                         new User({
@@ -52,6 +64,43 @@ passport.use(
                         })
                             .save()
                             .then((user) => done(null, user));
+                    }
+                });
+            }
+        },
+    ),
+);
+
+passport.use(
+    new FacebookStrategy(
+        {
+            clientID: process.env.FACEBOOK_APP_ID,
+            clientSecret: process.env.FACEBOOK_APP_SECRET,
+            callbackURL: 'http://localhost:4000/auth/facebook/callback',
+            profileFields: ['id', 'displayName', 'photos', 'email'],
+        },
+        (accessToken, refreshToken, profile, cb) => {
+            if (profile.id) {
+                User.findOne({ email: profile.emails[0].value }).then(async (existingUser) => {
+                    if (existingUser) {
+                        await User.updateOne(
+                            { email: profile.emails[0].value },
+                            {
+                                facebookId: profile.id,
+                            },
+                            {
+                                new: true,
+                            },
+                        );
+                        return cb(null, existingUser);
+                    } else {
+                        new User({
+                            facebookId: profile.id,
+                            email: profile.emails[0].value,
+                            name: profile.displayName,
+                        })
+                            .save()
+                            .then((user) => cb(null, user));
                     }
                 });
             }
@@ -70,18 +119,27 @@ app.use(
 );
 app.use(passport.initialize());
 app.use(passport.session());
+app.get('/auth/facebook', passport.authenticate('facebook', { scope: ['email'] }));
 app.get(
     '/auth/google',
     passport.authenticate('google', {
         scope: ['profile', 'email'],
     }),
 );
+
+app.get('/auth/facebook/callback', passport.authenticate('facebook'), (req, res) => {
+    const accessToken = jwt.sign({ userId: req?.user?._id }, process.env.ACCESS_TOKEN_SECRET, {
+        expiresIn: '5h',
+    });
+    const { password, ...info } = req?.user?._doc;
+    return res.status(200).json({ user: info, accessToken });
+});
 app.get('/auth/google/callback', passport.authenticate('google'), (req, res) => {
     // console.log(req.session);
     const accessToken = jwt.sign({ userId: req?.user?._id }, process.env.ACCESS_TOKEN_SECRET, {
         expiresIn: '5h',
     });
-    const { password, ...info } = req?.user;
+    const { password, ...info } = req?.user?._doc;
     return res.status(200).json({ user: info, accessToken });
 });
 app.get('/api/books', verifyToken, (req, res) => {
@@ -103,7 +161,7 @@ app.post('/auth/register', async (req, res) => {
         const findUser = await User.findOne({ email: email });
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(req.body.password, salt);
-        if (findUser?.googleId) {
+        if (findUser?.googleId || findUser?.facebookId) {
             if (!findUser?.password) {
                 await User.updateOne(
                     {
